@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -8,14 +9,17 @@ namespace ProductionStructureExplorer
 {
     public partial class MainForm : Form
     {
+        // UI Controls
+        private SplitContainer splitContainer;
+        private DataGridView dgvBom;
+        private DataGridView dgvRouting;
+
         private Button btnLoadBom;
         private Button btnLoadRouting;
         private Button btnExpandAll;
         private Button btnCollapseAll;
         private Button btnExport;
-        private DataGridView dgv;
         private Label lblInfo;
-        private Button btnSearchDB;
 
         private Label lblFeature;
         private TextBox txtFeature;
@@ -24,7 +28,7 @@ namespace ProductionStructureExplorer
 
         private readonly IExcelService _excelService;
 
-        // BOM / Routing 資料
+        // Data Storage
         internal DataTable _bomRaw = new();
         internal DataTable _bomSorted = new();
         internal Dictionary<string, List<DataRow>> _childrenByParent = new();
@@ -35,165 +39,117 @@ namespace ProductionStructureExplorer
         internal string _featureCode = "";
         internal string _rootCode = "";
 
-        // 欄位名稱
+        // --- Constants ---
         internal const string COL_PARENT = "PARENT";
         internal const string COL_CHILD = "CHILD";
         internal const string COL_LEVEL = "階層";
-        internal const string COL_OPSEQ = "工序";
         internal const string COL_EXPAND = "_EXPAND_";
 
-        internal const string COL_ROOT = "ROOT";
-        internal const string COL_FULLPATH = "FULL_PATH";
-        internal const string COL_FEATURE = "特性編碼";
-        internal const string COL_ORDER = "組合項次";
-        internal const string COL_USED = "是否使用";
+        // Routing 中文欄位定義 (對應 Excel 標頭)
+        internal const string COL_R_OPSEQ = "工序";
+        internal const string COL_R_DESC = "說明";
+        internal const string COL_R_MANPOWER = "單位人力";
+        internal const string COL_R_WC = "工作中心";
+        internal const string COL_R_SETUP = "準備工時";
+        internal const string COL_R_RUN = "標準工時";
+        internal const string COL_R_MACH = "機器工時";
 
-        // Grid 用 Tag 狀態
+        // Grid Tag State
         internal class BomNodeState
         {
             public DataRow Row { get; set; } = null!;
             public bool IsExpanded { get; set; } = false;
-            public bool IsRouting { get; set; } = false;
+            public int SourceIndex { get; set; } = -1;
         }
 
         public MainForm()
         {
             _excelService = new ExcelService();
 
-            Text = "ProductionStructureExplorer";
-            Width = 1200;
-            Height = 720;
+            Text = "Production Structure Explorer (Master-Detail)";
+            Width = 1400;
+            Height = 800;
             StartPosition = FormStartPosition.CenterScreen;
 
-            btnLoadBom = new Button
-            {
-                Text = "載入 BOM",
-                Left = 20,
-                Top = 20,
-                Width = 100,
-                Height = 30
-            };
-            btnLoadRouting = new Button
-            {
-                Text = "載入 Routing",
-                Left = 140,
-                Top = 20,
-                Width = 100,
-                Height = 30
-            };
-            btnExpandAll = new Button
-            {
-                Text = "全部展開",
-                Left = 260,
-                Top = 20,
-                Width = 100,
-                Height = 30
-            };
-            btnCollapseAll = new Button
-            {
-                Text = "全部收合",
-                Left = 380,
-                Top = 20,
-                Width = 100,
-                Height = 30
-            };
-            btnExport = new Button
-            {
-                Text = "匯出 Excel",
-                Left = 500,
-                Top = 20,
-                Width = 100,
-                Height = 30
-            };
+            // Initialize Controls
+            btnLoadBom = CreateBtn("載入 BOM", 20);
+            btnLoadRouting = CreateBtn("載入 Routing", 140);
+            btnExpandAll = CreateBtn("全部展開", 260);
+            btnCollapseAll = CreateBtn("全部收合", 380);
+            btnExport = CreateBtn("匯出 Excel", 500);
 
-            lblFeature = new Label
-            {
-                Left = 630,
-                Top = 24,
-                Width = 60,
-                Height = 20,
-                Text = "特性編碼:"
-            };
-            txtFeature = new TextBox
-            {
-                Left = 690,
-                Top = 20,
-                Width = 100,
-                Height = 24,
-                //ReadOnly = true
-            };
+            lblFeature = new Label { Left = 630, Top = 24, Width = 60, Text = "特性編碼:" };
+            txtFeature = new TextBox { Left = 690, Top = 20, Width = 100 };
+            lblRoot = new Label { Left = 810, Top = 24, Width = 50, Text = "ROOT:" };
+            txtRoot = new TextBox { Left = 860, Top = 20, Width = 120 };
+            lblInfo = new Label { Left = 20, Top = 60, Width = 1300, Height = 30, Text = "請載入資料..." };
 
-            lblRoot = new Label
-            {
-                Left = 810,
-                Top = 24,
-                Width = 50,
-                Height = 20,
-                Text = "ROOT:"
-            };
-            txtRoot = new TextBox
-            {
-                Left = 860,
-                Top = 20,
-                Width = 120,
-                Height = 24,
-                //ReadOnly = true
-            };
-
-            btnSearchDB = new Button
-            {
-                Text = "查詢",
-                Left = 1000,
-                Top = 20,
-                Width = 100,
-                Height = 30
-            };
-
-            lblInfo = new Label
-            {
-                Left = 20,
-                Top = 60,
-                Width = 1100,
-                Height = 30,
-                Text = "請先載入 BOM，必要欄位：階層 / ROOT / PARENT / CHILD / 組合項次 / 特性編碼 / FULL_PATH / 是否使用 / 失效日期。"
-            };
-
-            dgv = new DataGridView
+            // SplitContainer
+            splitContainer = new SplitContainer
             {
                 Left = 20,
                 Top = 100,
-                Width = 1140,
-                Height = 560,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells
+                Width = 1340,
+                Height = 640,
+                Orientation = Orientation.Vertical,
+                SplitterDistance = 600,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
             };
 
-            Controls.Add(btnLoadBom);
-            Controls.Add(btnLoadRouting);
-            Controls.Add(btnExpandAll);
-            Controls.Add(btnCollapseAll);
-            Controls.Add(btnExport);
-            Controls.Add(lblRoot);
-            Controls.Add(txtRoot);
-            Controls.Add(lblFeature);
-            Controls.Add(txtFeature);
-            Controls.Add(lblInfo);
-            Controls.Add(dgv);
-            Controls.Add(btnSearchDB);
+            // Left Grid (BOM) - [關鍵修正] 加入 EditMode 設定
+            dgvBom = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells,
+                // [關鍵] 禁止進入編輯模式，確保點擊事件 100% 觸發
+                EditMode = DataGridViewEditMode.EditProgrammatically
+            };
 
+            // Right Grid (Routing)
+            dgvRouting = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                RowHeadersVisible = false,
+                BackgroundColor = Color.WhiteSmoke,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+            };
+
+            splitContainer.Panel1.Controls.Add(dgvBom);
+            splitContainer.Panel2.Controls.Add(dgvRouting);
+
+            Controls.AddRange(new Control[] {
+                btnLoadBom, btnLoadRouting, btnExpandAll, btnCollapseAll, btnExport,
+                lblRoot, txtRoot, lblFeature, txtFeature, lblInfo, splitContainer
+            });
+
+            // Events
             btnLoadBom.Click += BtnLoadBom_Click;
             btnLoadRouting.Click += BtnLoadRouting_Click;
             btnExpandAll.Click += BtnExpandAll_Click;
             btnCollapseAll.Click += BtnCollapseAll_Click;
             btnExport.Click += BtnExport_Click;
-            dgv.CellClick += Dgv_CellClick;
+
+            dgvBom.SelectionChanged += DgvBom_SelectionChanged;
+            dgvBom.CellClick += DgvBom_CellClick;
         }
 
-        internal void BuildGridColumns()
+        private Button CreateBtn(string text, int left)
         {
-            dgv.Columns.Clear();
+            return new Button { Text = text, Left = left, Top = 20, Width = 100, Height = 30 };
+        }
 
+        internal void BuildBomColumns()
+        {
+            dgvBom.Columns.Clear();
+
+            // [優化] 展開欄位設為置中，像按鈕一樣
             var expandCol = new DataGridViewTextBoxColumn
             {
                 Name = COL_EXPAND,
@@ -201,17 +157,14 @@ namespace ProductionStructureExplorer
                 Width = 30,
                 ReadOnly = true
             };
-            dgv.Columns.Add(expandCol);
+            expandCol.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            expandCol.DefaultCellStyle.Font = new Font("Consolas", 10, FontStyle.Bold); // 用等寬字體讓 + 號漂亮一點
+            dgvBom.Columns.Add(expandCol);
 
-            // 其他欄位從 _bomSorted 建立，排除 helper 欄位
             foreach (DataColumn col in _bomSorted.Columns)
             {
-                if (string.Equals(col.ColumnName, COL_PARENT, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(col.ColumnName, COL_ORDER, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(col.ColumnName, COL_FULLPATH, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(col.ColumnName, COL_FEATURE, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(col.ColumnName, COL_ROOT, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(col.ColumnName, COL_USED, StringComparison.OrdinalIgnoreCase))
+                if (new[] { COL_PARENT, "組合項次", "FULL_PATH", "特性編碼", "ROOT", "是否使用", "SOURCE" }
+                    .Any(x => x.Equals(col.ColumnName, StringComparison.OrdinalIgnoreCase)))
                 {
                     continue;
                 }
@@ -219,157 +172,95 @@ namespace ProductionStructureExplorer
                 var gridCol = new DataGridViewTextBoxColumn
                 {
                     Name = col.ColumnName,
-                    HeaderText = col.ColumnName,
+                    HeaderText = col.ColumnName == COL_CHILD ? "料號" : col.ColumnName,
                     ReadOnly = true
                 };
-
-                if (string.Equals(col.ColumnName, COL_CHILD, StringComparison.OrdinalIgnoreCase))
-                    gridCol.HeaderText = "料號";
-
-                dgv.Columns.Add(gridCol);
-            }
-
-            // 工序欄（給 Routing 用）
-            if (!dgv.Columns.Contains(COL_OPSEQ))
-            {
-                var opCol = new DataGridViewTextBoxColumn
-                {
-                    Name = COL_OPSEQ,
-                    HeaderText = COL_OPSEQ,
-                    ReadOnly = true
-                };
-                dgv.Columns.Add(opCol);
+                dgvBom.Columns.Add(gridCol);
             }
         }
 
-        internal int AddBomGridRow(DataRow srcRow, int? insertIndex = null)
+        internal void BuildRoutingColumns()
         {
-            int rowIndex;
-            if (insertIndex.HasValue)
-            {
-                dgv.Rows.Insert(insertIndex.Value, 1);
-                rowIndex = insertIndex.Value;
-            }
-            else
-            {
-                rowIndex = dgv.Rows.Add();
-            }
+            dgvRouting.Columns.Clear();
 
-            var gr = dgv.Rows[rowIndex];
+            // 使用中文常數
+            AddRoutingCol(COL_R_OPSEQ, COL_R_OPSEQ);
+            AddRoutingCol(COL_R_DESC, COL_R_DESC);
+            AddRoutingCol(COL_R_MANPOWER, COL_R_MANPOWER);
+            AddRoutingCol(COL_R_WC, COL_R_WC);
+            AddRoutingCol(COL_R_SETUP, COL_R_SETUP);
+            AddRoutingCol(COL_R_RUN, COL_R_RUN);
+            AddRoutingCol(COL_R_MACH, COL_R_MACH);
+        }
 
-            var state = new BomNodeState { Row = srcRow, IsExpanded = false, IsRouting = false };
-            gr.Tag = state;
+        private void AddRoutingCol(string name, string header)
+        {
+            dgvRouting.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = name,
+                HeaderText = header,
+                ReadOnly = true
+            });
+        }
+
+        internal bool HasBomChildren(string childKey)
+        {
+            if (string.IsNullOrEmpty(childKey)) return false;
+            return _childrenByParent.ContainsKey(childKey) && _childrenByParent[childKey].Count > 0;
+        }
+
+        internal int AddBomGridRow(DataRow srcRow, int sourceIdx, int? insertIndex = null)
+        {
+            var newRow = new DataGridViewRow();
+            newRow.CreateCells(dgvBom);
+
+            var state = new BomNodeState { Row = srcRow, IsExpanded = false, SourceIndex = sourceIdx };
+            newRow.Tag = state;
 
             string childKey = srcRow[COL_CHILD]?.ToString()?.Trim() ?? "";
-            bool hasBomChildren = !string.IsNullOrEmpty(childKey) &&
-                                  _childrenByParent.ContainsKey(childKey) &&
-                                  _childrenByParent[childKey].Count > 0;
-            bool hasRouting = !string.IsNullOrEmpty(childKey) &&
-                              _routingByChild.ContainsKey(childKey) &&
-                              _routingByChild[childKey].Count > 0;
+            newRow.Cells[dgvBom.Columns[COL_EXPAND].Index].Value = HasBomChildren(childKey) ? "+" : "";
 
-            gr.Cells[COL_EXPAND].Value = (hasBomChildren || hasRouting) ? "+" : "";
+            if (_routingByChild.ContainsKey(childKey))
+            {
+                newRow.DefaultCellStyle.ForeColor = Color.Blue;
+                newRow.DefaultCellStyle.Font = new Font(dgvBom.Font, FontStyle.Bold);
+            }
 
-            foreach (DataGridViewColumn col in dgv.Columns)
+            FillRowData(newRow, srcRow, dgvBom);
+
+            if (insertIndex.HasValue && insertIndex.Value >= 0 && insertIndex.Value <= dgvBom.Rows.Count)
+            {
+                dgvBom.Rows.Insert(insertIndex.Value, newRow);
+                return insertIndex.Value;
+            }
+            return dgvBom.Rows.Add(newRow);
+        }
+
+        private void FillRowData(DataGridViewRow gridRow, DataRow dataRow, DataGridView grid)
+        {
+            foreach (DataGridViewColumn col in grid.Columns)
             {
                 if (col.Name == COL_EXPAND) continue;
 
                 object? value = null;
-                if (srcRow.Table.Columns.Contains(col.Name))
+                if (dataRow.Table.Columns.Contains(col.Name))
                 {
-                    value = srcRow[col.Name];
+                    value = dataRow[col.Name];
                 }
-
-                gr.Cells[col.Name].Value =
-                    value == null || value == DBNull.Value ? "" : value.ToString();
+                gridRow.Cells[col.Index].Value = value == null || value == DBNull.Value ? "" : value.ToString();
             }
-
-            return rowIndex;
-        }
-
-        internal int AddRoutingGridRow(DataRow routingRow, string baseLevelText, int? insertIndex = null)
-        {
-            int rowIndex;
-            if (insertIndex.HasValue)
-            {
-                dgv.Rows.Insert(insertIndex.Value, 1);
-                rowIndex = insertIndex.Value;
-            }
-            else
-            {
-                rowIndex = dgv.Rows.Add();
-            }
-
-            var gr = dgv.Rows[rowIndex];
-
-            var state = new BomNodeState { Row = routingRow, IsExpanded = false, IsRouting = true };
-            gr.Tag = state;
-
-            gr.Cells[COL_EXPAND].Value = "";
-
-            foreach (DataGridViewColumn col in dgv.Columns)
-            {
-                if (col.Name == COL_EXPAND) continue;
-
-                if (col.Name == COL_LEVEL)
-                {
-                    gr.Cells[col.Name].Value = string.IsNullOrEmpty(baseLevelText)
-                        ? "R"
-                        : baseLevelText + "R";
-                    continue;
-                }
-
-                object? value = null;
-                if (routingRow.Table.Columns.Contains(col.Name))
-                {
-                    value = routingRow[col.Name];
-                }
-
-                gr.Cells[col.Name].Value =
-                    value == null || value == DBNull.Value ? "" : value.ToString();
-            }
-
-            return rowIndex;
-        }
-
-        internal int InsertRoutingRows(string childKey, string baseLevelText, int? insertIndex)
-        {
-            if (string.IsNullOrEmpty(childKey)) return insertIndex ?? dgv.Rows.Count;
-            if (!_routingByChild.TryGetValue(childKey, out var ops) || ops.Count == 0)
-                return insertIndex ?? dgv.Rows.Count;
-
-            int idx = insertIndex ?? dgv.Rows.Count;
-
-            foreach (var opRow in ops)
-            {
-                bool alreadyVisible = false;
-                foreach (DataGridViewRow gr in dgv.Rows)
-                {
-                    if (gr.Tag is BomNodeState s && s.IsRouting && s.Row == opRow)
-                    {
-                        alreadyVisible = true;
-                        break;
-                    }
-                }
-                if (alreadyVisible) continue;
-
-                AddRoutingGridRow(opRow, baseLevelText, idx);
-                idx++;
-            }
-
-            return idx;
         }
 
         internal void ShowOnlyLevel1()
         {
-            dgv.Rows.Clear();
-
-            foreach (DataRow row in _bomSorted.Rows)
+            dgvBom.Rows.Clear();
+            for (int i = 0; i < _bomSorted.Rows.Count; i++)
             {
+                DataRow row = _bomSorted.Rows[i];
                 int level = ParseInt(row[COL_LEVEL]);
                 if (level == 1)
                 {
-                    AddBomGridRow(row);
+                    AddBomGridRow(row, i);
                 }
             }
         }
@@ -378,16 +269,8 @@ namespace ProductionStructureExplorer
         {
             if (v == null || v == DBNull.Value) return int.MaxValue;
             var s = v.ToString()?.Trim();
-
-            if (!string.IsNullOrEmpty(s))
-            {
-                int i = 0;
-                while (i < s.Length && char.IsDigit(s[i])) i++;
-                if (i > 0 && int.TryParse(s.Substring(0, i), out var n))
-                    return n;
-            }
-
-            return int.TryParse(s, out var n2) ? n2 : int.MaxValue;
+            if (int.TryParse(s, out var n)) return n;
+            return int.MaxValue;
         }
     }
 }

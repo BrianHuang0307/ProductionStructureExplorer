@@ -2,8 +2,7 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace ProductionStructureExplorer
 {
@@ -11,43 +10,29 @@ namespace ProductionStructureExplorer
     {
         private void BtnLoadBom_Click(object? sender, EventArgs e)
         {
-            using var ofd = new OpenFileDialog
-            {
-                Filter = "Excel Files|*.xlsx;*.xlsm;*.xls",
-                Title = "選擇 BOM 檔"
-            };
+            using var ofd = new OpenFileDialog { Filter = "Excel Files|*.xlsx;*.xls", Title = "選擇 BOM 檔" };
             if (ofd.ShowDialog() != DialogResult.OK) return;
 
             try
             {
                 _bomRaw = _excelService.LoadBom(ofd.FileName, out _featureCode, out _rootCode);
-
                 var order = BomService.BuildDfsOrder(_bomRaw);
                 _bomSorted = BomService.ApplyOrder(_bomRaw, order);
-
                 _childrenByParent = BomService.BuildChildrenMap(_bomSorted);
 
-                BuildGridColumns();
+                BuildBomColumns();
                 ShowOnlyLevel1();
 
                 txtRoot.Text = _rootCode;
                 txtFeature.Text = _featureCode;
-
-                lblInfo.Text = $"已載入 BOM：{_bomSorted.Rows.Count} 列 (已排除失效日期有值的列)。目前只顯示階層 = 1。";
+                lblInfo.Text = $"已載入 BOM：{_bomSorted.Rows.Count} 列。";
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show("載入 / 處理 BOM 失敗： " + ex.Message);
-            }
+            catch (Exception ex) { MessageBox.Show("載入失敗: " + ex.Message); }
         }
 
         private void BtnLoadRouting_Click(object? sender, EventArgs e)
         {
-            using var ofd = new OpenFileDialog
-            {
-                Filter = "Excel Files|*.xlsx;*.xlsm;*.xls",
-                Title = "選擇 Routing 檔"
-            };
+            using var ofd = new OpenFileDialog { Filter = "Excel Files|*.xlsx;*.csv", Title = "選擇 Routing 檔" };
             if (ofd.ShowDialog() != DialogResult.OK) return;
 
             try
@@ -55,205 +40,187 @@ namespace ProductionStructureExplorer
                 _routingRaw = _excelService.LoadRouting(ofd.FileName);
                 _routingByChild = RoutingService.BuildRoutingMap(_routingRaw);
 
-                lblInfo.Text = $"已載入 Routing：{_routingRaw.Rows.Count} 列（依 CHILD + 工序 可掛到 BOM 上）。";
+                BuildRoutingColumns();
+
+                // 刷新左側
+                if (_bomSorted != null && _bomSorted.Rows.Count > 0)
+                {
+                    foreach (DataGridViewRow row in dgvBom.Rows)
+                    {
+                        if (row.Tag is BomNodeState state)
+                        {
+                            string child = state.Row[COL_CHILD]?.ToString() ?? "";
+                            if (_routingByChild.ContainsKey(child))
+                            {
+                                row.DefaultCellStyle.ForeColor = System.Drawing.Color.Blue;
+                                row.DefaultCellStyle.Font = new System.Drawing.Font(dgvBom.Font, System.Drawing.FontStyle.Bold);
+                            }
+                        }
+                    }
+                }
+
+                lblInfo.Text = $"已載入 Routing：{_routingRaw.Rows.Count} 列。";
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show("載入 Routing 失敗： " + ex.Message);
-            }
+            catch (Exception ex) { MessageBox.Show("載入失敗: " + ex.Message); }
         }
 
-        private void BtnExpandAll_Click(object? sender, EventArgs e)
+        // --- 核心修改：使用中文鍵值更新右側表格 ---
+        private void DgvBom_SelectionChanged(object? sender, EventArgs e)
         {
-            if (_bomSorted == null || _bomSorted.Rows.Count == 0)
+            try
             {
-                MessageBox.Show("請先載入 BOM。");
-                return;
-            }
+                dgvRouting.Rows.Clear();
 
-            dgv.Rows.Clear();
+                if (dgvBom.SelectedRows.Count == 0) return;
 
-            foreach (DataRow row in _bomSorted.Rows)
-            {
-                AddBomGridRow(row);
-                string childKey = row[COL_CHILD]?.ToString()?.Trim() ?? "";
-                string levelText = row[COL_LEVEL]?.ToString()?.Trim() ?? "";
+                var selectedRow = dgvBom.SelectedRows[0];
+                if (selectedRow.Tag is not BomNodeState state) return;
 
-                InsertRoutingRows(childKey, levelText, null);
-            }
+                string childKey = state.Row[COL_CHILD]?.ToString()?.Trim() ?? "";
 
-            for (int i = 0; i < dgv.Rows.Count; i++)
-            {
-                var gr = dgv.Rows[i];
-                if (gr.Tag is BomNodeState state && !state.IsRouting)
+                if (!string.IsNullOrEmpty(childKey) && _routingByChild.TryGetValue(childKey, out var routingRows))
                 {
-                    string childKey = state.Row[COL_CHILD]?.ToString()?.Trim() ?? "";
-                    if (!string.IsNullOrEmpty(childKey) &&
-                        _childrenByParent.ContainsKey(childKey) &&
-                        _childrenByParent[childKey].Count > 0)
+                    // 排序：嘗試使用 "工序" 欄位排序
+                    var sortedRouting = routingRows.OrderBy(r =>
                     {
-                        state.IsExpanded = true;
-                        gr.Cells[COL_EXPAND].Value = "-";
+                        string val = GetSafeValue(r, COL_R_OPSEQ);
+                        if (int.TryParse(val, out int seq)) return seq;
+                        return 9999;
+                    });
+
+                    foreach (var rRow in sortedRouting)
+                    {
+                        int idx = dgvRouting.Rows.Add();
+                        var gridRow = dgvRouting.Rows[idx];
+
+                        // 使用 UI 定義的中文欄位名稱填入資料
+                        gridRow.Cells[COL_R_OPSEQ].Value = GetSafeValue(rRow, COL_R_OPSEQ);
+                        gridRow.Cells[COL_R_DESC].Value = GetSafeValue(rRow, COL_R_DESC);
+                        gridRow.Cells[COL_R_MANPOWER].Value = GetSafeValue(rRow, COL_R_MANPOWER);
+                        gridRow.Cells[COL_R_WC].Value = GetSafeValue(rRow, COL_R_WC);
+                        gridRow.Cells[COL_R_SETUP].Value = GetSafeValue(rRow, COL_R_SETUP);
+                        gridRow.Cells[COL_R_RUN].Value = GetSafeValue(rRow, COL_R_RUN);
+                        gridRow.Cells[COL_R_MACH].Value = GetSafeValue(rRow, COL_R_MACH);
                     }
                 }
             }
-
-            lblInfo.Text = $"全部展開：顯示 {dgv.Rows.Count} 列（含 Routing 製程）。";
+            catch (Exception)
+            {
+                // Ignore
+            }
         }
 
-        private void BtnCollapseAll_Click(object? sender, EventArgs e)
+        private string GetSafeValue(DataRow row, string colName)
         {
-            if (_bomSorted == null || _bomSorted.Rows.Count == 0)
+            // 精確比對
+            if (row.Table.Columns.Contains(colName))
+                return row[colName]?.ToString() ?? "";
+
+            // 模糊比對
+            foreach (DataColumn col in row.Table.Columns)
             {
-                MessageBox.Show("請先載入 BOM。");
-                return;
+                if (col.ColumnName.Trim().Equals(colName.Trim(), StringComparison.OrdinalIgnoreCase))
+                    return row[col]?.ToString() ?? "";
             }
 
-            ShowOnlyLevel1();
-            lblInfo.Text = "已收合：只顯示階層 = 1（不顯示 Routing）。";
+            return "";
         }
 
-        private void BtnExport_Click(object? sender, EventArgs e)
-        {
-            if (dgv.Rows.Count == 0)
-            {
-                MessageBox.Show("目前畫面沒有資料可以匯出。");
-                return;
-            }
-
-            using var sfd = new SaveFileDialog
-            {
-                Filter = "Excel Files|*.xlsx",
-                FileName = "BomRouting_View.xlsx"
-            };
-            if (sfd.ShowDialog() != DialogResult.OK) return;
-
-            try
-            {
-                //  直接匯出當前的 DataGridView 狀態
-                _excelService.ExportGridToExcel(dgv, sfd.FileName);
-                MessageBox.Show("匯出完成！（以目前 Grid 顯示為準）");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("匯出失敗： " + ex.Message);
-            }
-        }
-
-        private void Dgv_CellClick(object? sender, DataGridViewCellEventArgs e)
+        private void DgvBom_CellClick(object? sender, DataGridViewCellEventArgs e)
         {
             if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
 
-            var col = dgv.Columns[e.ColumnIndex];
-            if (col.Name != COL_EXPAND) return;
+            if (dgvBom.Columns[e.ColumnIndex].Name == COL_EXPAND)
+            {
+                var row = dgvBom.Rows[e.RowIndex];
+                if (row.Tag is not BomNodeState state) return;
 
-            var row = dgv.Rows[e.RowIndex];
-            if (row.Tag is not BomNodeState state) return;
+                string childKey = state.Row[COL_CHILD]?.ToString() ?? "";
+                if (!HasBomChildren(childKey)) return;
 
-            if (state.IsRouting) return;
-
-            string childKey = state.Row[COL_CHILD]?.ToString()?.Trim() ?? "";
-            bool hasBomChildren = !string.IsNullOrEmpty(childKey) &&
-                                  _childrenByParent.ContainsKey(childKey) &&
-                                  _childrenByParent[childKey].Count > 0;
-            bool hasRouting = !string.IsNullOrEmpty(childKey) &&
-                              _routingByChild.ContainsKey(childKey) &&
-                              _routingByChild[childKey].Count > 0;
-
-            if (!hasBomChildren && !hasRouting)
-                return;
-
-            if (state.IsExpanded)
-                CollapseRow(e.RowIndex);
-            else
-                ExpandRow(e.RowIndex);
+                if (state.IsExpanded) CollapseRow(e.RowIndex);
+                else ExpandRow(e.RowIndex);
+            }
         }
 
         private void ExpandRow(int rowIndex)
         {
-            var row = dgv.Rows[rowIndex];
-            if (row.Tag is not BomNodeState state) return;
-            if (state.IsRouting) return;
-
-            string childKey = state.Row[COL_CHILD]?.ToString()?.Trim() ?? "";
-            if (string.IsNullOrEmpty(childKey))
-                return;
-
-            string levelText = state.Row[COL_LEVEL]?.ToString()?.Trim() ?? "";
-
+            var row = dgvBom.Rows[rowIndex];
+            var state = row.Tag as BomNodeState;
+            int currentLevel = ParseInt(state.Row[COL_LEVEL]);
             int insertIndex = rowIndex + 1;
+            int sourceIndex = state.SourceIndex;
 
-            insertIndex = InsertRoutingRows(childKey, levelText, insertIndex);
-
-            if (_childrenByParent.TryGetValue(childKey, out var children) && children.Count > 0)
+            if (sourceIndex >= 0 && sourceIndex < _bomSorted.Rows.Count - 1)
             {
-                foreach (var childRow in children)
+                for (int i = sourceIndex + 1; i < _bomSorted.Rows.Count; i++)
                 {
-                    bool alreadyVisible = false;
-                    foreach (DataGridViewRow gr in dgv.Rows)
-                    {
-                        if (gr.Tag is BomNodeState s && !s.IsRouting && s.Row == childRow)
-                        {
-                            alreadyVisible = true;
-                            break;
-                        }
-                    }
-                    if (alreadyVisible) continue;
+                    DataRow nextRow = _bomSorted.Rows[i];
+                    int nextLevel = ParseInt(nextRow[COL_LEVEL]);
 
-                    AddBomGridRow(childRow, insertIndex);
-                    insertIndex++;
+                    if (nextLevel <= currentLevel) break;
+
+                    if (nextLevel == currentLevel + 1)
+                    {
+                        AddBomGridRow(nextRow, i, insertIndex);
+                        insertIndex++;
+                    }
                 }
             }
-
             state.IsExpanded = true;
             row.Cells[COL_EXPAND].Value = "-";
         }
 
         private void CollapseRow(int rowIndex)
         {
-            var row = dgv.Rows[rowIndex];
-            if (row.Tag is not BomNodeState state) return;
-            if (state.IsRouting) return;
-
+            var row = dgvBom.Rows[rowIndex];
+            var state = row.Tag as BomNodeState;
             int myLevel = ParseInt(state.Row[COL_LEVEL]);
             int i = rowIndex + 1;
 
-            while (i < dgv.Rows.Count)
+            while (i < dgvBom.Rows.Count)
             {
-                var gr = dgv.Rows[i];
-                if (gr.Tag is not BomNodeState s)
-                {
-                    i++;
-                    continue;
-                }
-
-                if (s.IsRouting)
-                {
-                    dgv.Rows.RemoveAt(i);
-                    continue;
-                }
+                var gr = dgvBom.Rows[i];
+                if (gr.Tag is not BomNodeState s) { i++; continue; }
 
                 int level = ParseInt(s.Row[COL_LEVEL]);
-                if (level <= myLevel)
-                    break;
+                if (level <= myLevel) break;
 
-                dgv.Rows.RemoveAt(i);
+                dgvBom.Rows.RemoveAt(i);
             }
-
             state.IsExpanded = false;
+            row.Cells[COL_EXPAND].Value = "+";
+        }
 
-            string childKey = state.Row[COL_CHILD]?.ToString()?.Trim() ?? "";
-            bool hasBomChildren = !string.IsNullOrEmpty(childKey) &&
-                                  _childrenByParent.ContainsKey(childKey) &&
-                                  _childrenByParent[childKey].Count > 0;
-            bool hasRouting = !string.IsNullOrEmpty(childKey) &&
-                              _routingByChild.ContainsKey(childKey) &&
-                              _routingByChild[childKey].Count > 0;
+        private void BtnExpandAll_Click(object? sender, EventArgs e)
+        {
+            if (_bomSorted == null) return;
+            dgvBom.Rows.Clear();
+            for (int i = 0; i < _bomSorted.Rows.Count; i++)
+            {
+                DataRow row = _bomSorted.Rows[i];
+                AddBomGridRow(row, i);
 
-            if (hasBomChildren || hasRouting)
-                row.Cells[COL_EXPAND].Value = "+";
-            else
-                row.Cells[COL_EXPAND].Value = "";
+                var gridRow = dgvBom.Rows[dgvBom.Rows.Count - 1];
+                var state = gridRow.Tag as BomNodeState;
+                string childKey = row[COL_CHILD]?.ToString() ?? "";
+
+                if (HasBomChildren(childKey))
+                {
+                    state.IsExpanded = true;
+                    gridRow.Cells[COL_EXPAND].Value = "-";
+                }
+            }
+        }
+
+        private void BtnCollapseAll_Click(object? sender, EventArgs e)
+        {
+            ShowOnlyLevel1();
+        }
+
+        private void BtnExport_Click(object? sender, EventArgs e)
+        {
+            _excelService.ExportGridToExcel(dgvBom, "BOM_Tree.xlsx");
         }
     }
 }
